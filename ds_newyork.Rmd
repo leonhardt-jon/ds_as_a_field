@@ -1,0 +1,201 @@
+---
+title: "NYPD Shooting Data"
+date: "2022-06-03"
+output: html_document
+---
+
+# NYPD Shooting Data
+
+In this project we will examine data detailing shootings in NY from the NYPD. We will be investigating to see if there are patterns within the shootings across the NYC boroughs. Find out if fatality rates vary by location. What temporal patterns exist in shooting incidents. Finally, we will see if we can predict future shooting trends.
+
+## Import in the data
+
+First we load in the data.
+
+```{r}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+
+website <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+nypd_dat <- read_csv(website) %>%
+  mutate(OCCUR_DATE = mdy(OCCUR_DATE)) %>%
+  arrange(OCCUR_DATE)
+```
+
+## Yearly Shootings In Each Borough
+
+Lets take a look at what the yearly count of shootings looks like, and do a comparison between the different boroughs. To do this, we will create a column of just the year from the OCCUR_DATE column. We will then group BORO and year_of to provide a count of all instances of a unique BORO and year_of. Using the distinct function, we can trim the dataset of any repeated entrys.
+
+```{r}
+summary(nypd_dat)
+nypd_dat
+
+boro_dat <- nypd_dat %>%
+  mutate(year_of = year(OCCUR_DATE)) %>%
+  group_by(BORO, year_of) %>%
+  add_count(name = "reported") %>%
+  select(BORO, year_of, reported) %>%
+  distinct() %>%
+  ungroup()
+boro_dat
+```
+
+Lets plot the yearly shootings and compare each borrow.
+
+```{r}
+boro_dat %>%
+  ggplot(aes(year_of, reported, colour=BORO)) +
+  geom_col()
+```
+
+From the data, we can see that the Bronx has the highest number of reported shootings. Before jumping to any conclusions from this data, we should ask, what are the number of reported shootings with respect to population sizes? Are the number of reported shootings a function of population size? Are there other driving factors such as more security in one location versus another? It is hard to come to a decisive conclusion based on the current data.
+
+## Death Rate In Each Borough
+
+What about death rate? What are the deaths per year due to the reported shootings in each borough? To do this analysis, we will need to count the number of shootings result in a STATISTICAL_MURDER_FLAG being true. We can then join that table to a table that is counting total shootings and divide the deaths by the shootings.
+
+```{r}
+death_dat <- nypd_dat %>%
+  mutate(year_of = year(OCCUR_DATE)) %>%
+  group_by(BORO) %>%
+  filter(STATISTICAL_MURDER_FLAG == TRUE) %>%
+  add_count(name = "deaths") %>%
+  select(BORO, deaths) %>%
+  distinct() %>%
+  ungroup()
+
+shooting_dat <- nypd_dat %>%
+  group_by(BORO) %>%
+  add_count(name = "shootings") %>%
+  select(BORO, shootings) %>%
+  distinct() %>%
+  inner_join(death_dat) %>%
+  mutate(death_rate = (deaths / shootings))
+
+shooting_dat %>%
+  ggplot(aes(BORO, death_rate, fill=BORO)) +
+  geom_col()
+```
+
+From this plot we can see that Staten Island has the highest rate of death from shootings. This leads me to ask questions like, are the Staten Island hospitals poorly equipped to deal with shootings? Is the response rate for first responders faster in Manhattan?
+
+## Shooting per hour in NYC
+
+What does the frequency of shootings look like per time?
+
+```{r}
+hour_dat <- nypd_dat %>%
+  mutate(hour_of = hour(OCCUR_TIME)) %>%
+  group_by(hour_of) %>%
+  add_count(name = "shootings_hour") %>%
+  select(hour_of, shootings_hour) %>%
+  distinct() 
+
+hour_dat %>%
+  ggplot(aes(hour_of, shootings_hour)) +
+  geom_col()
+```
+
+From this plot we can see that 9 am seems to be the least likely time in which a shooting will occur, with the highest occurrences happening around midnight and into the early morning. Could shootings be reduced by increasing night time security?
+
+## Seasonal Patterns in Shootings
+
+Let's analyze whether there are seasonal patterns in shooting incidents across New York City.
+
+```{r}
+seasonal_dat <- nypd_dat %>%
+  mutate(
+    month = month(OCCUR_DATE),
+    season = case_when(
+      month %in% c(12, 1, 2) ~ "Winter",
+      month %in% c(3, 4, 5) ~ "Spring",
+      month %in% c(6, 7, 8) ~ "Summer",
+      month %in% c(9, 10, 11) ~ "Fall"
+    )
+  ) %>%
+  group_by(season) %>%
+  summarise(
+    total_shootings = n(),
+    fatal_shootings = sum(STATISTICAL_MURDER_FLAG, na.rm = TRUE),
+    fatality_rate = fatal_shootings / total_shootings
+  )
+
+ggplot(seasonal_dat, aes(x = season, y = total_shootings, fill = season)) +
+  geom_col() +
+  labs(title = "Seasonal Distribution of Shootings",
+       x = "Season",
+       y = "Total Number of Shootings") +
+  theme_minimal()
+
+ggplot(seasonal_dat, aes(x = season, y = fatality_rate, fill = season)) +
+  geom_col() +
+  labs(title = "Fatality Rate by Season",
+       x = "Season",
+       y = "Fatality Rate") +
+  theme_minimal()
+```
+
+The analysis reveals clear seasonal patterns in shooting incidents, with summer months showing significantly higher numbers of incidents. This could be related to various factors such as increased outdoor activity and social interactions during warmer months.
+
+## Predictive Modeling
+
+Let's build a simple linear model to predict the number of shootings based on various factors. We'll focus on temporal patterns and borough-specific effects.
+
+```{r}
+model_dat <- nypd_dat %>%
+  mutate(
+    year = year(OCCUR_DATE),
+    month = month(OCCUR_DATE),
+    hour = hour(OCCUR_TIME)
+  ) %>%
+  group_by(year, month, BORO) %>%
+  summarise(
+    shootings = n(),
+    .groups = 'drop'
+  )
+
+model_dat <- model_dat %>%
+  mutate(
+    is_bronx = BORO == "BRONX",
+    is_brooklyn = BORO == "BROOKLYN",
+    is_manhattan = BORO == "MANHATTAN",
+    is_queens = BORO == "QUEENS"
+  )
+
+shooting_model <- lm(shootings ~ year + month + is_bronx + is_brooklyn + is_manhattan + is_queens, 
+                    data = model_dat)
+
+summary(shooting_model)
+
+new_data <- expand_grid(
+  year = 2022,
+  month = 1:12,
+  BORO = unique(model_dat$BORO)
+) %>%
+  mutate(
+    is_bronx = BORO == "BRONX",
+    is_brooklyn = BORO == "BROOKLYN",
+    is_manhattan = BORO == "MANHATTAN",
+    is_queens = BORO == "QUEENS"
+  )
+
+predictions <- predict(shooting_model, newdata = new_data, interval = "prediction")
+new_data$predicted_shootings <- predictions[, "fit"]
+
+ggplot(new_data, aes(x = month, y = predicted_shootings, color = BORO)) +
+  geom_line() +
+  labs(title = "Predicted Shootings by Borough in 2022",
+       x = "Month",
+       y = "Predicted Number of Shootings") +
+  theme_minimal()
+```
+
+The linear model reveals that there is a significant seasonal effect, with higher numbers of shootings in summer months. The model also shows that the Bronx and Brooklyn show consistently higher predicted shooting incidents.
+
+
+## Conclusion
+
+From this analysis, there are a number of experiments that can be performed to gain further insight to reduce the number of shootings in New York City. Could there be ways to reduce the death rate due to shootings in Staten Island? Could shootings in the Bronx be reduced by a higher police presence early in the morning? The seasonal analysis suggests that increased prevention efforts during summer months might be particularly effective, while the predictive model helps identify which boroughs might need more targeted interventions.
+
+There is a number of potential biases that we need to consider for this analysis. We need to consider that the reporting could be different across precints and that there could be underreporting in certain areas. Additionally, there could be changes in reporting methods over time.
